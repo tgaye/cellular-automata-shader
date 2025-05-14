@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+
+    <meta charset="utf-8">
+    <title>Cellular Automata Shader</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: center;
+            position: relative;
+        }
+        canvas {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            color: white;
+            max-width: 250px;
+            z-index: 100;
+        }
+        #ui h2 {
+            margin-top: 0;
+            font-size: 16px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+        }
+        .control-group {
+            margin-bottom: 12px;
+        }
+        label {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        .value-display {
+            font-size: 11px;
+            color: #aaa;
+            text-align: right;
+        }
+        button {
+            background: #333;
+            color: white;
+            border: none;
+            padding: 6px 10px;
+            margin: 4px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        button:hover {
+            background: #444;
+        }
+        #toggle-ui {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 101;
+        }
+        #error-message {
+            color: white;
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+    </style>
+
+<base target="_self">
+
+
+    <div id="canvas-container">
+        <div id="error-message"></div>
+    </div>
+    <button id="toggle-ui">☰</button>
+    <div id="ui">
+        <h2>Cellular Automata Controls</h2>
+        
+        <div class="control-group">
+            <label for="speed">Simulation Speed</label>
+            <input type="range" id="speed" min="0" max="2" step="0.1" value="1">
+            <div class="value-display" id="speed-value">1.0</div>
+        </div>
+        
+        <div class="control-group">
+            <label for="colorRate">Color Mutation Rate</label>
+            <input type="range" id="colorRate" min="0" max="1" step="0.01" value="0.1">
+            <div class="value-display" id="colorRate-value">0.10</div>
+        </div>
+        
+        <div class="control-group">
+            <label for="brushSize">Brush Size</label>
+            <input type="range" id="brushSize" min="1" max="20" step="1" value="5">
+            <div class="value-display" id="brushSize-value">5</div>
+        </div>
+        
+        <div class="control-group">
+            <label for="ruleSelect">Rule Set</label>
+            <select id="ruleSelect">
+                <option value="0">Game of Life (B3/S23)</option>
+                <option value="1">High Life (B36/S23)</option>
+                <option value="2">Maze (B3/S12345)</option>
+                <option value="3">Replicator (B1357/S1357)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <button id="randomize">Randomize</button>
+            <button id="clear">Clear</button>
+        </div>
+        
+        <div class="control-group">
+            <button id="presetGlider">Add Glider</button>
+            <button id="presetPulsar">Add Pulsar</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script>
+        // Check for WebGL support
+        if (!window.WebGLRenderingContext) {
+            const container = document.getElementById('canvas-container');
+            container.innerHTML = '<div style="color: white; text-align: center; padding: 20px;">Your browser does not support WebGL. Please try with a modern browser.</div>';
+            throw new Error('WebGL not supported');
+        }
+
+        // Main variables
+        let renderer, scene, camera, material;
+        let simulationUniforms;
+        let renderTargetA, renderTargetB;
+        let currentRenderTarget, previousRenderTarget;
+        let isMouseDown = false;
+        let mouseX = 0, mouseY = 0;
+        let lastTime = 0;
+        let frameCount = 0;
+        let fps = 60;
+
+        // Initialize Three.js
+        function init() {
+            const container = document.getElementById('canvas-container');
+            
+            // Calculate dimensions with max-width constraint
+            const maxWidth = 1200;
+            const aspectRatio = 16/9;
+            const width = Math.min(window.innerWidth, maxWidth);
+            const height = width / aspectRatio;
+            
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+            container.appendChild(renderer.domElement);
+            
+            // Create scene
+            scene = new THREE.Scene();
+            
+            // Create camera
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            
+            // Create render targets for ping-pong rendering
+            const rtOptions = {
+                minFilter: THREE.NearestFilter,
+                magFilter: THREE.NearestFilter,
+                format: THREE.RGBAFormat,
+                type: THREE.FloatType
+            };
+            
+            renderTargetA = new THREE.WebGLRenderTarget(width, height, rtOptions);
+            renderTargetB = new THREE.WebGLRenderTarget(width, height, rtOptions);
+            currentRenderTarget = renderTargetA;
+            previousRenderTarget = renderTargetB;
+            
+            // Create simulation material
+            simulationUniforms = {
+                u_resolution: { value: new THREE.Vector2(width, height) },
+                u_previousState: { value: previousRenderTarget.texture },
+                u_time: { value: 0 },
+                u_mouse: { value: new THREE.Vector2(-1, -1) },
+                u_brushSize: { value: 5 },
+                u_brushActive: { value: 0 },
+                u_randomize: { value: 0 },
+                u_clear: { value: 0 },
+                u_preset: { value: -1 },
+                u_speed: { value: 1 },
+                u_colorRate: { value: 0.1 },
+                u_ruleSet: { value: 0 }
+            };
+            
+            material = new THREE.ShaderMaterial({
+                uniforms: simulationUniforms,
+                vertexShader: `
+                    varying vec2 vUv;
+                    
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    precision highp float;
+                    
+                    uniform vec2 u_resolution;
+                    uniform sampler2D u_previousState;
+                    uniform float u_time;
+                    uniform vec2 u_mouse;
+                    uniform float u_brushSize;
+                    uniform float u_brushActive;
+                    uniform float u_randomize;
+                    uniform float u_clear;
+                    uniform float u_preset;
+                    uniform float u_speed;
+                    uniform float u_colorRate;
+                    uniform int u_ruleSet;
+                    
+                    varying vec2 vUv;
+                    
+                    // Random hash function
+                    float hash(vec2 p) {
+                        return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+                    }
+                    
+                    // Convert RGB to HSL
+                    vec3 rgb2hsl(vec3 c) {
+                        float minVal = min(min(c.r, c.g), c.b);
+                        float maxVal = max(max(c.r, c.g), c.b);
+                        float delta = maxVal - minVal;
+                        
+                        float h = 0.0;
+                        float s = 0.0;
+                        float l = (maxVal + minVal) / 2.0;
+                        
+                        if (delta != 0.0) {
+                            s = l < 0.5 ? delta / (maxVal + minVal) : delta / (2.0 - maxVal - minVal);
+                            
+                            if (c.r == maxVal) {
+                                h = (c.g - c.b) / delta;
+                            } else if (c.g == maxVal) {
+                                h = 2.0 + (c.b - c.r) / delta;
+                            } else {
+                                h = 4.0 + (c.r - c.g) / delta;
+                            }
+                            
+                            h *= 60.0;
+                            if (h < 0.0) h += 360.0;
+                        }
+                        
+                        return vec3(h, s, l);
+                    }
+                    
+                    // Convert HSL to RGB
+                    vec3 hsl2rgb(vec3 c) {
+                        float h = c.x;
+                        float s = c.y;
+                        float l = c.z;
+                        
+                        float cVal = (1.0 - abs(2.0 * l - 1.0)) * s;
+                        float x = cVal * (1.0 - abs(mod(h / 60.0, 2.0) - 1.0));
+                        float m = l - cVal / 2.0;
+                        
+                        vec3 rgb;
+                        if (h < 60.0) {
+                            rgb = vec3(cVal, x, 0.0);
+                        } else if (h < 120.0) {
+                            rgb = vec3(x, cVal, 0.0);
+                        } else if (h < 180.0) {
+                            rgb = vec3(0.0, cVal, x);
+                        } else if (h < 240.0) {
+                            rgb = vec3(0.0, x, cVal);
+                        } else if (h < 300.0) {
+                            rgb = vec3(x, 0.0, cVal);
+                        } else {
+                            rgb = vec3(cVal, 0.0, x);
+                        }
+                        
+                        return rgb + m;
+                    }
+                    
+                    // Apply Game of Life rules
+                    vec4 applyRules(vec2 uv) {
+                        vec4 current = texture2D(u_previousState, uv);
+                        float alive = current.a > 0.5 ? 1.0 : 0.0;
+                        vec3 color = current.rgb;
+                        
+                        // Count live neighbors
+                        float neighbors = 0.0;
+                        vec3 neighborColor = vec3(0.0);
+                        
+                        for (int y = -1; y <= 1; y++) {
+                            for (int x = -1; x <= 1; x++) {
+                                if (x == 0 && y == 0) continue;
+                                
+                                vec2 offset = vec2(float(x), float(y)) / u_resolution;
+                                vec4 neighbor = texture2D(u_previousState, uv + offset);
+                                
+                                if (neighbor.a > 0.5) {
+                                    neighbors += 1.0;
+                                    neighborColor += neighbor.rgb;
+                                }
+                            }
+                        }
+                        
+                        // Apply different rules based on selection
+                        bool birth = false;
+                        bool survive = false;
+                        
+                        if (u_ruleSet == 0) { // Game of Life (B3/S23)
+                            birth = (neighbors == 3.0);
+                            survive = (neighbors == 2.0 || neighbors == 3.0);
+                        } else if (u_ruleSet == 1) { // High Life (B36/S23)
+                            birth = (neighbors == 3.0 || neighbors == 6.0);
+                            survive = (neighbors == 2.0 || neighbors == 3.0);
+                        } else if (u_ruleSet == 2) { // Maze (B3/S12345)
+                            birth = (neighbors == 3.0);
+                            survive = (neighbors >= 1.0 && neighbors <= 5.0);
+                        } else if (u_ruleSet == 3) { // Replicator (B1357/S1357)
+                            birth = (mod(neighbors, 2.0) == 1.0);
+                            survive = (mod(neighbors, 2.0) == 1.0);
+                        }
+                        
+                        // Determine new state
+                        float newAlive = alive;
+                        vec3 newColor = color;
+                        
+                        if (birth && alive < 0.5) {
+                            newAlive = 1.0;
+                            if (neighbors > 0.0) {
+                                // Blend colors from neighbors with some mutation
+                                vec3 avgColor = neighborColor / neighbors;
+                                vec3 hsl = rgb2hsl(avgColor);
+                                hsl.x = mod(hsl.x + hash(uv + u_time) * u_colorRate * 360.0, 360.0);
+                                newColor = hsl2rgb(hsl);
+                            } else {
+                                // Random color for new cell with no neighbors
+                                newColor = vec3(
+                                    hash(uv + 0.1),
+                                    hash(uv + 0.2),
+                                    hash(uv + 0.3)
+                                );
+                            }
+                        } else if (!survive && alive > 0.5) {
+                            newAlive = 0.0;
+                        }
+                        
+                        return vec4(newColor, newAlive);
+                    }
+                    
+                    // Create preset patterns
+                    vec4 applyPreset(vec2 uv) {
+                        if (u_preset < 0.5) return vec4(0.0);
+                        
+                        // Glider pattern
+                        if (u_preset < 1.5) {
+                            vec2 center = u_mouse;
+                            vec2 pixel = floor(uv * u_resolution);
+                            vec2 relPos = pixel - center;
+                            
+                            if (abs(relPos.x) <= 1.0 && abs(relPos.y) <= 1.0) {
+                                if ((relPos.x == 0.0 && relPos.y == -1.0) ||
+                                    (relPos.x == 1.0 && relPos.y == 0.0) ||
+                                    (relPos.x == -1.0 && relPos.y == 1.0) ||
+                                    (relPos.x == 0.0 && relPos.y == 1.0) ||
+                                    (relPos.x == 1.0 && relPos.y == 1.0)) {
+                                    return vec4(0.0, 0.8, 1.0, 1.0);
+                                }
+                            }
+                        }
+                        // Pulsar pattern
+                        else if (u_preset < 2.5) {
+                            vec2 center = u_mouse;
+                            vec2 pixel = floor(uv * u_resolution);
+                            vec2 relPos = pixel - center;
+                            
+                            if (abs(relPos.x) <= 6.0 && abs(relPos.y) <= 6.0) {
+                                // Pulsar arms
+                                bool xArm = (abs(relPos.x) <= 1.0 && abs(relPos.y) >= 2.0 && abs(relPos.y) <= 6.0);
+                                bool yArm = (abs(relPos.y) <= 1.0 && abs(relPos.x) >= 2.0 && abs(relPos.x) <= 6.0);
+                                
+                                if (xArm || yArm) {
+                                    return vec4(1.0, 0.5, 0.0, 1.0);
+                                }
+                            }
+                        }
+                        
+                        return vec4(0.0);
+                    }
+                    
+                    void main() {
+                        vec2 uv = vUv;
+                        
+                        // Handle clear command
+                        if (u_clear > 0.5) {
+                            gl_FragColor = vec4(0.0);
+                            return;
+                        }
+                        
+                        // Handle randomize command
+                        if (u_randomize > 0.5) {
+                            float rnd = hash(uv + vec2(u_time));
+                            if (rnd > 0.9) {
+                                gl_FragColor = vec4(
+                                    hash(uv + 0.1),
+                                    hash(uv + 0.2),
+                                    hash(uv + 0.3),
+                                    1.0
+                                );
+                            } else {
+                                gl_FragColor = vec4(0.0);
+                            }
+                            return;
+                        }
+                        
+                        // Handle preset patterns
+                        vec4 preset = applyPreset(uv);
+                        if (preset.a > 0.5) {
+                            gl_FragColor = preset;
+                            return;
+                        }
+                        
+                        // Handle brush drawing
+                        if (u_brushActive > 0.5) {
+                            float dist = distance(uv * u_resolution, u_mouse);
+                            if (dist < u_brushSize) {
+                                float rnd = hash(uv + vec2(u_time));
+                                if (rnd > 0.7) {
+                                    gl_FragColor = vec4(
+                                        hash(uv + 0.1),
+                                        hash(uv + 0.2),
+                                        hash(uv + 0.3),
+                                        1.0
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        
+                        // Apply cellular automata rules
+                        gl_FragColor = applyRules(uv);
+                    }
+                `
+            });
+            
+            // Create full-screen quad
+            const geometry = new THREE.PlaneGeometry(2, 2);
+            const quad = new THREE.Mesh(geometry, material);
+            scene.add(quad);
+            
+            // Initialize with random state
+            simulationUniforms.u_randomize.value = 1;
+            renderer.setRenderTarget(currentRenderTarget);
+            renderer.render(scene, camera);
+            simulationUniforms.u_randomize.value = 0;
+            
+            // Set up event listeners
+            setupEventListeners();
+            
+            // Set up UI controls
+            setupUIControls();
+            
+            // Start animation loop
+            animate();
+        }
+        
+        // Set up event listeners
+        function setupEventListeners() {
+            // Mouse/touch interaction
+            const canvas = renderer.domElement;
+            
+            function updateMousePosition(event) {
+                const rect = canvas.getBoundingClientRect();
+                mouseX = (event.clientX - rect.left) * (canvas.width / rect.width);
+                mouseY = (event.clientY - rect.top) * (canvas.height / rect.height);
+                simulationUniforms.u_mouse.value.set(mouseX, mouseY);
+            }
+            
+            canvas.addEventListener('mousedown', (event) => {
+                isMouseDown = true;
+                updateMousePosition(event);
+                simulationUniforms.u_brushActive.value = 1;
+            });
+            
+            canvas.addEventListener('mousemove', (event) => {
+                updateMousePosition(event);
+            });
+            
+            canvas.addEventListener('mouseup', () => {
+                isMouseDown = false;
+                simulationUniforms.u_brushActive.value = 0;
+            });
+            
+            canvas.addEventListener('mouseleave', () => {
+                isMouseDown = false;
+                simulationUniforms.u_brushActive.value = 0;
+            });
+            
+            // Touch support
+            canvas.addEventListener('touchstart', (event) => {
+                isMouseDown = true;
+                event.preventDefault();
+                updateMousePosition(event.touches[0]);
+                simulationUniforms.u_brushActive.value = 1;
+            });
+            
+            canvas.addEventListener('touchmove', (event) => {
+                event.preventDefault();
+                updateMousePosition(event.touches[0]);
+            });
+            
+            canvas.addEventListener('touchend', () => {
+                isMouseDown = false;
+                simulationUniforms.u_brushActive.value = 0;
+            });
+            
+            // Window resize
+            window.addEventListener('resize', onWindowResize);
+        }
+        
+        // Set up UI controls
+        function setupUIControls() {
+            // Speed control
+            const speedSlider = document.getElementById('speed');
+            const speedValue = document.getElementById('speed-value');
+            speedSlider.addEventListener('input', () => {
+                const value = parseFloat(speedSlider.value);
+                speedValue.textContent = value.toFixed(1);
+                simulationUniforms.u_speed.value = value;
+            });
+            
+            // Color rate control
+            const colorRateSlider = document.getElementById('colorRate');
+            const colorRateValue = document.getElementById('colorRate-value');
+            colorRateSlider.addEventListener('input', () => {
+                const value = parseFloat(colorRateSlider.value);
+                colorRateValue.textContent = value.toFixed(2);
+                simulationUniforms.u_colorRate.value = value;
+            });
+            
+            // Brush size control
+            const brushSizeSlider = document.getElementById('brushSize');
+            const brushSizeValue = document.getElementById('brushSize-value');
+            brushSizeSlider.addEventListener('input', () => {
+                const value = parseInt(brushSizeSlider.value);
+                brushSizeValue.textContent = value;
+                simulationUniforms.u_brushSize.value = value;
+            });
+            
+            // Rule set selection
+            const ruleSelect = document.getElementById('ruleSelect');
+            ruleSelect.addEventListener('change', () => {
+                simulationUniforms.u_ruleSet.value = parseInt(ruleSelect.value);
+            });
+            
+            // Randomize button
+            document.getElementById('randomize').addEventListener('click', () => {
+                simulationUniforms.u_randomize.value = 1;
+                renderer.setRenderTarget(currentRenderTarget);
+                renderer.render(scene, camera);
+                simulationUniforms.u_randomize.value = 0;
+            });
+            
+            // Clear button
+            document.getElementById('clear').addEventListener('click', () => {
+                simulationUniforms.u_clear.value = 1;
+                renderer.setRenderTarget(currentRenderTarget);
+                renderer.render(scene, camera);
+                simulationUniforms.u_clear.value = 0;
+            });
+            
+            // Preset buttons
+            document.getElementById('presetGlider').addEventListener('click', () => {
+                simulationUniforms.u_preset.value = 1;
+                renderer.setRenderTarget(currentRenderTarget);
+                renderer.render(scene, camera);
+                simulationUniforms.u_preset.value = -1;
+            });
+            
+            document.getElementById('presetPulsar').addEventListener('click', () => {
+                simulationUniforms.u_preset.value = 2;
+                renderer.setRenderTarget(currentRenderTarget);
+                renderer.render(scene, camera);
+                simulationUniforms.u_preset.value = -1;
+            });
+            
+            // Toggle UI button
+            document.getElementById('toggle-ui').addEventListener('click', () => {
+                const ui = document.getElementById('ui');
+                ui.style.display = ui.style.display === 'none' ? 'block' : 'none';
+            });
+        }
+        
+        // Handle window resize
+        function onWindowResize() {
+            const container = document.getElementById('canvas-container');
+            const maxWidth = 1200;
+            const aspectRatio = 16/9;
+            const width = Math.min(window.innerWidth, maxWidth);
+            const height = width / aspectRatio;
+            
+            renderer.setSize(width, height);
+            simulationUniforms.u_resolution.value.set(width, height);
+            
+            // Recreate render targets with new size
+            const rtOptions = {
+                minFilter: THREE.NearestFilter,
+                magFilter: THREE.NearestFilter,
+                format: THREE.RGBAFormat,
+                type: THREE.FloatType
+            };
+            
+            renderTargetA.dispose();
+            renderTargetB.dispose();
+            
+            renderTargetA = new THREE.WebGLRenderTarget(width, height, rtOptions);
+            renderTargetB = new THREE.WebGLRenderTarget(width, height, rtOptions);
+            
+            // Reinitialize with random state
+            currentRenderTarget = renderTargetA;
+            previousRenderTarget = renderTargetB;
+            simulationUniforms.u_previousState.value = previousRenderTarget.texture;
+            
+            simulationUniforms.u_randomize.value = 1;
+            renderer.setRenderTarget(currentRenderTarget);
+            renderer.render(scene, camera);
+            simulationUniforms.u_randomize.value = 0;
+        }
+        
+        // Animation loop
+        function animate(time = 0) {
+            requestAnimationFrame(animate);
+            
+            // Update time
+            simulationUniforms.u_time.value = time * 0.001;
+            
+            // Calculate FPS
+            frameCount++;
+            if (time - lastTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastTime = time;
+                
+                // Adaptive quality based on FPS
+                if (fps < 30) {
+                    simulationUniforms.u_speed.value = Math.max(0.5, simulationUniforms.u_speed.value * 0.9);
+                    document.getElementById('speed').value = simulationUniforms.u_speed.value;
+                    document.getElementById('speed-value').textContent = simulationUniforms.u_speed.value.toFixed(1);
+                }
+            }
+            
+            // Ping-pong rendering for simulation
+            for (let i = 0; i < Math.floor(simulationUniforms.u_speed.value); i++) {
+                // Swap render targets
+                const temp = currentRenderTarget;
+                currentRenderTarget = previousRenderTarget;
+                previousRenderTarget = temp;
+                
+                simulationUniforms.u_previousState.value = previousRenderTarget.texture;
+                
+                // Render to current target
+                renderer.setRenderTarget(currentRenderTarget);
+                renderer.render(scene, camera);
+            }
+            
+            // Render to screen
+            renderer.setRenderTarget(null);
+            renderer.render(scene, camera);
+        }
+        
+        // Initialize the application
+        init();
+    </script>
+
+              
+          
+                
+          
+              
